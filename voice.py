@@ -25,10 +25,70 @@ def voice_id():
     return os.environ.get("ELEVENLABS_VOICE_ID", DEFAULT_VOICE)
 
 
+def _have(mod):
+    import importlib.util
+    return importlib.util.find_spec(mod) is not None
+
+
+def tts_engine():
+    if available():
+        return "elevenlabs"
+    return "edge" if _have("edge_tts") else "browser"
+
+
+def stt_engine():
+    if available():
+        return "elevenlabs"
+    return "whisper" if _have("faster_whisper") else "browser"
+
+
+EDGE_VOICE = os.environ.get("JARVIS_EDGE_VOICE", "es-AR-TomasNeural")
+_WHISPER = None
+
+
+def _edge_speak(text):
+    import asyncio
+    import edge_tts
+
+    async def run():
+        c = edge_tts.Communicate(text[:1500], EDGE_VOICE, rate="+8%", pitch="-6Hz")
+        out = b""
+        async for ch in c.stream():
+            if ch["type"] == "audio":
+                out += ch["data"]
+        return out
+    return asyncio.run(run())
+
+
+def _whisper_transcribe(audio, mime):
+    global _WHISPER
+    import tempfile
+    from faster_whisper import WhisperModel
+    if _WHISPER is None:
+        _WHISPER = WhisperModel(os.environ.get("JARVIS_WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+    ext = "ogg" if "ogg" in mime else ("mp4" if "mp4" in mime else "webm")
+    with tempfile.NamedTemporaryFile(suffix="." + ext, delete=False) as f:
+        f.write(audio)
+        path = f.name
+    try:
+        segs, _ = _WHISPER.transcribe(path, language="es", vad_filter=True, beam_size=1)
+        return " ".join(s.text.strip() for s in segs).strip()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def speak(text):
     """Returns mp3 bytes, or raises. Caller decides what to do on failure."""
     if not available():
-        raise RuntimeError("no ELEVENLABS_API_KEY")
+        t = (text or "").strip()
+        if not t:
+            raise ValueError("empty text")
+        if tts_engine() == "edge":
+            return _edge_speak(t)
+        raise RuntimeError("no TTS engine")
     text = (text or "").strip()
     if not text:
         raise ValueError("empty text")
@@ -63,10 +123,12 @@ def transcribe(audio, mime="audio/webm"):
     Chrome and is a silently-failing stub in Brave — and because it ships your
     audio to Google. This keeps listening on the same provider as speaking.
     """
-    if not available():
-        raise RuntimeError("no ELEVENLABS_API_KEY")
     if not audio:
         raise ValueError("empty audio")
+    if not available():
+        if stt_engine() == "whisper":
+            return _whisper_transcribe(audio, mime)
+        raise RuntimeError("no STT engine")
 
     ext = {"audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4",
            "audio/mpeg": "mp3", "audio/wav": "wav"}.get(mime.split(";")[0], "webm")
@@ -111,3 +173,18 @@ def voices():
     return [dict(id=v.get("voice_id"), name=v.get("name"),
                  labels=v.get("labels", {}))
             for v in body.get("voices", [])]
+
+
+def warm():
+    """Preload Whisper so the first spoken turn doesn't pay the model load."""
+    if stt_engine() == "whisper":
+        try:
+            import threading
+            def _w():
+                global _WHISPER
+                from faster_whisper import WhisperModel
+                if _WHISPER is None:
+                    _WHISPER = WhisperModel(os.environ.get("JARVIS_WHISPER_MODEL", "small"), device="cpu", compute_type="int8")
+            threading.Thread(target=_w, daemon=True).start()
+        except Exception:
+            pass

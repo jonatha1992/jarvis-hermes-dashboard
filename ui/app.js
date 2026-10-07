@@ -203,7 +203,8 @@ let recognition = null;
 let micStream=null, recorder=null, chunks=[], actx=null, analyser=null, vdata=null;
 let vad=null, spoke=false, loudAt=0, turnStart=0;
 let floorSum=0, floorN=0, threshold=0.02, peak=0, calibrating=true;
-const SILENCE=900, MIN_TURN_MS=350, MAX_TURN_MS=18000, NO_SPEECH_MS=10000;
+const SILENCE=1300, MIN_TURN_MS=350, MAX_TURN_MS=120000, NO_SPEECH_MS=15000;
+let roomFloorKnown = false; let roomFloor = 0.004;   // noise floor learned across turns (only ever from non-speech frames)
 
 // ── voice out ──
 let muted = false, player = null;
@@ -216,7 +217,7 @@ function speak(text){
     if (!RT.tts && RT.browserTts && speechSynth){
       try{
         speechSynth.cancel();
-        const u = new SpeechSynthesisUtterance(spoken);
+        const u = new SpeechSynthesisUtterance(spoken); u.lang = 'es-AR'; const _v = speechSynth.getVoices().find(v => /^es[-_](AR|MX|US|ES)/i.test(v.lang)); if (_v) u.voice = _v;
         u.rate = 0.95; u.pitch = 0.82; u.volume = 1;
         document.body.classList.add('speaking');
         u.onend = u.onerror = () => { document.body.classList.remove('speaking'); resolve(); };
@@ -294,7 +295,7 @@ function stopConvo(){
 function startBrowserRecognition(){
   if (!convo || suppress || !SpeechRecognition) return;
   recognition = new SpeechRecognition();
-  recognition.lang = 'en-US';
+  recognition.lang = 'es-AR';
   recognition.interimResults = true;
   recognition.continuous = false;
   let finalText = '';
@@ -330,7 +331,7 @@ function startBrowserRecognition(){
 function beginTurn(){
   if (!convo || suppress || !micStream) return;
   chunks = []; spoke = false; peak = 0;
-  floorSum = 0; floorN = 0; calibrating = true; threshold = 0.02;
+  floorSum = 0; floorN = 0; calibrating = !roomFloorKnown; threshold = Math.max(0.008, roomFloor * 2.2 + 0.003);
   recorder = new MediaRecorder(micStream, pickMime());
   recorder.ondataavailable = e => { if (e.data?.size) chunks.push(e.data); };
   recorder.onstop = ship;
@@ -371,12 +372,14 @@ function vtick(){
     floorSum += rms; floorN++;
     if (t - turnStart > 300){
       const floor = floorSum / Math.max(1, floorN);
-      threshold = Math.max(0.006, floor * 1.6 + 0.003);
+      roomFloor = Math.min(floor, 0.02); roomFloorKnown = true;
+      threshold = Math.max(0.008, roomFloor * 2.2 + 0.003);
       calibrating = false;
     }
     return;
   }
 
+  if (!spoke && rms <= threshold) roomFloor = roomFloor * 0.98 + rms * 0.02;   // keep tracking ambient noise
   if (rms > threshold){
     loudAt = t;
     if (!spoke){ spoke = true; log('voice','VOICE','speech detected'); }
@@ -529,25 +532,25 @@ setInterval(async () => {
   defaultTip = $('#tip').textContent;
   try {
     const s = await fetch('/api/status').then(r=>r.json());
-    RT.tts = s.tts==='elevenlabs'; RT.stt = s.stt==='elevenlabs';
+    RT.tts = s.tts!=='browser'; RT.stt = s.stt!=='browser';
     RT.browserStt = !!SpeechRecognition; RT.browserTts = !!speechSynth;
 
     const port = location.port || '8730';
     sys('gw', `online · :${port}`, 'ok');
     sys('brain', s.runtime === 'hermes' ? 'Hermes Agent' : 'Hermes offline', s.runtime === 'hermes' ? 'ok' : 'warn');
-    sys('voice', `${RT.stt?'ElevenLabs STT':'Browser STT'} / ${RT.tts?'ElevenLabs TTS':'Browser TTS'}`, (RT.browserStt||RT.stt) ? '' : 'warn');
+    sys('voice', `${RT.stt?'Local STT':'Browser STT'} / ${RT.tts?'Edge TTS':'Browser TTS'}`, (RT.browserStt||RT.stt) ? '' : 'warn');
     sys('profile', s.profile || 'default');
     sys('runtime', s.runtime || '—', s.runtime === 'hermes' ? 'ok' : 'warn');
     sys('clock', now());
     $('#top-gw').textContent = `Gateway: online ${location.origin}`;
     $('#top-profile').textContent = 'Profile: ' + (s.profile || 'default');
-    $('#top-voice').textContent = 'Voice: ' + (RT.stt ? 'ElevenLabs STT' : (RT.browserStt ? 'browser STT' : s.stt)) + ' / ' + (RT.tts ? 'ElevenLabs TTS' : 'browser TTS');
+    $('#top-voice').textContent = 'Voice: ' + (RT.stt ? 'Local STT' : (RT.browserStt ? 'browser STT' : s.stt)) + ' / ' + (RT.tts ? 'Edge TTS' : 'browser TTS');
     const tools = (s.tools || []).slice(0, 12);
     $('#toolsList').innerHTML = tools.length ? tools.map(t => `<span class="chip">${esc(t)}</span>`).join('') : '<span class="chip ghost">Hermes tool list unavailable — set HERMES_CMD if needed</span>';
 
     log('status', 'BOOT',
         `gateway online · ${s.runtime} core · profile=${s.profile || 'default'} · permission=${s.permission}`);
-    log('voice', 'VOICE', `channel ready — ${RT.stt ? 'ElevenLabs STT' : (RT.browserStt ? 'browser STT' : s.stt)} / ${RT.tts ? 'ElevenLabs TTS' : 'browser TTS'}`);
+    log('voice', 'VOICE', `channel ready — ${RT.stt ? 'Local STT' : (RT.browserStt ? 'browser STT' : s.stt)} / ${RT.tts ? 'Edge TTS' : 'browser TTS'}`);
     $('#mic').textContent = RT.stt ? '◉ ElevenLabs Voice' : '◉ Browser Voice';
     setState('', 'STANDBY', 'awaiting uplink');
   } catch(e){

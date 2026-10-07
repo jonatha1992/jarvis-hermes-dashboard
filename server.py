@@ -121,8 +121,8 @@ class Handler(BaseHTTPRequestHandler):
                 browser_tts=True,
                 voice_mode=os.environ.get("JARVIS_VOICE_MODE", "elevenlabs" if voice.available() else "browser"),
                 voice_id=voice.voice_id() if voice.available() else "browser",
-                stt="elevenlabs" if voice.available() else "browser",
-                tts="elevenlabs" if voice.available() else "browser",
+                stt=voice.stt_engine(),
+                tts=voice.tts_engine(),
                 session=SESSION["id"]))
         if p == "/api/jobs":
             if not self._token_ok():
@@ -175,11 +175,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/new":
             runtime.cancel_active()
+            runtime.reset()
             SESSION["id"] = None
             return self._json({"ok": True})
 
         if p == "/api/cancel":
             stopped = runtime.cancel_active()
+            runtime.reset()
             SESSION["id"] = None
             return self._json({"ok": True, "stopped": stopped})
 
@@ -277,6 +279,7 @@ def main():
   open         http://localhost:{PORT}
 """, flush=True)
 
+    voice.warm()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     if os.environ.get("JARVIS_OPEN", "1") != "0":
         webbrowser.open(f"http://localhost:{PORT}")

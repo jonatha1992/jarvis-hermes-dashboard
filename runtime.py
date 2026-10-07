@@ -299,3 +299,91 @@ def run(message, session_id=None, system=None):
         yield from run_hermes(message, session_id, system)
     except Exception as e:  # noqa: BLE001
         yield dict(t="error", message=f"could not start Hermes core: {e}")
+
+
+# ── fast path: persistent Hermes API server (avoids ~14s CLI startup per turn) ──
+_HIST = collections.deque(maxlen=8)
+
+
+def reset():
+    """Clear conversational history buffer for fresh sessions."""
+    _HIST.clear()
+
+
+def _api_conf():
+    key = os.environ.get("HERMES_API_KEY", "")
+    url = os.environ.get("HERMES_API_URL", "http://127.0.0.1:8642")
+    if not key:
+        try:
+            envp = os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/AppData/Local/hermes")), ".env")
+            for ln in open(envp, encoding="utf-8"):
+                if ln.startswith("API_SERVER_KEY="):
+                    key = ln.split("=", 1)[1].strip()
+        except OSError:
+            pass
+    return (url, key) if key else (None, None)
+
+
+def run_api(message, session_id=None, system=None):
+    import json as _json
+    import logging as _logging
+    import urllib.request as _rq
+    url, key = _api_conf()
+    started = _mono_ms()
+    msgs = ([{"role": "system", "content": system}] if system else []) + list(_HIST) + [{"role": "user", "content": message}]
+    req = _rq.Request(url + "/v1/chat/completions", method="POST",
+                      data=_json.dumps({"model": "hermes-agent", "messages": msgs, "stream": True}).encode("utf-8"),
+                      headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+    out, first, event = [], True, ""
+    try:
+        with _rq.urlopen(req, timeout=int(os.environ.get("JARVIS_TIMEOUT", "120"))) as r:
+            for raw in r:
+                ln = raw.decode("utf-8", "replace").strip()
+                if ln.startswith("event:"):
+                    event = ln[6:].strip(); continue
+                if not ln.startswith("data:"):
+                    if not ln:
+                        event = ""
+                    continue
+                data = ln[5:].strip()
+                if data == "[DONE]":
+                    break
+                if event == "hermes.tool.progress":
+                    continue
+                try:
+                    piece = _json.loads(data)["choices"][0]["delta"].get("content") or ""
+                except (ValueError, KeyError, IndexError):
+                    continue
+                if piece:
+                    if first:
+                        first = False
+                        yield dict(t="latency", ms=_mono_ms() - started)
+                    out.append(piece)
+                    yield dict(t="delta", text=piece)
+    except Exception as exc:
+        _logging.getLogger("runtime").warning("Hermes API stream error: %s", exc)
+        if first:
+            # Did not emit any output yet; re-raise to let run() fall back to CLI
+            raise
+        # Already emitted deltas; emit error and stop to avoid replaying duplicated speech
+        yield dict(t="error", message=f"Hermes API stream error: {exc}")
+        return
+
+    text = "".join(out).strip()
+    _HIST.append({"role": "user", "content": message})
+    _HIST.append({"role": "assistant", "content": text})
+    yield dict(t="complete", session_id=session_id, ms=_mono_ms() - started)
+
+
+_orig_run = run
+
+
+def run(message, session_id=None, system=None):  # noqa: F811
+    url, key = _api_conf()
+    if key:
+        try:
+            yield from run_api(message, session_id, system)
+            return
+        except Exception:  # noqa: BLE001 — fall back to the CLI path
+            pass
+    yield from _orig_run(message, session_id, system)

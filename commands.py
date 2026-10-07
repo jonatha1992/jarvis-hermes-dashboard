@@ -103,7 +103,7 @@ def start_background(mission, runner):
             status = "failed"
             text = f"failed: {e}"[:260]
         with _JOB_LOCK:
-            JOBS[jid].update(status="done", result=text.strip(), finished=time.time())
+            JOBS[jid].update(status=status, result=text.strip(), finished=time.time())
         def finish(d2):
             for item in d2.get("missions", []):
                 if item.get("id") == jid:
@@ -121,7 +121,7 @@ def jobs_snapshot():
 
 def take_finished():
     with _JOB_LOCK:
-        done = [dict(j) for j in JOBS.values() if j["status"] == "done"]
+        done = [dict(j) for j in JOBS.values() if j["status"] in ("done", "failed")]
         for j in done:
             JOBS.pop(j["id"], None)
         return done
