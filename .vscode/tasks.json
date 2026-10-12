@@ -1,0 +1,7 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Python: run dashboard", "type": "shell", "command": "python server.py", "isBackground": true, "problemMatcher": [] },
+    { "label": "Python: compile check", "type": "shell", "command": "python -m compileall -q .", "group": "build" }
+  ]
+}
