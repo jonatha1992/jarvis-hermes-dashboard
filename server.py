@@ -13,6 +13,7 @@ import mimetypes
 import os
 import pathlib
 import secrets
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -36,6 +37,17 @@ import runtime          # noqa: E402
 import voice            # noqa: E402
 
 PORT = int(os.environ.get("JARVIS_PORT", "8730"))
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
+
+
+def _git_sha():
+    sha = os.environ.get("GIT_SHA", "")
+    if len(sha) >= 7 and all(c in "0123456789abcdefABCDEF" for c in sha):
+        return sha[:7]
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 API_TOKEN = secrets.token_urlsafe(32)
 RUN_LOCK = threading.Lock()
 MAX_JSON_BODY = 1024 * 1024
@@ -108,6 +120,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._json({"error": "invalid host"}, 403)
         p = urlparse(self.path).path
+        if p == "/version.json":
+            return self._json({"version": APP_VERSION, "sha": _git_sha()})
         if p == "/api/status":
             return self._json(dict(
                 runtime=runtime.runtime_kind(),
